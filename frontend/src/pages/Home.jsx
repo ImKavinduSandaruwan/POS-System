@@ -12,6 +12,8 @@ export const Home = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeCategory, setActiveCategory] = useState(1);
+  // State for managing the edit modal
+  const [editProduct, setEditProduct] = useState(null);
 
   // Fetch categories and products
   useEffect(() => {
@@ -46,15 +48,22 @@ export const Home = () => {
         }
         const productsData = await productsResponse.json();
         
-        // Transform products data
+        // Transform products data, including extra fields for editing/updating
         const transformedProducts = productsData.map(product => ({
           id: product.productId,
           name: product.name,
-          category: product.category.categoryName,
+          // Store full category object and its name for display
+          category: product.category, 
+          categoryName: product.category.categoryName,
           price: product.price,
           image: getProductImage(product.name),
           added: false,
-          available: product.available
+          available: product.available,
+          quantity: product.quantity,
+          description: product.description,
+          isAvailable: product.isAvailable,
+          createdAt: product.createdAt,
+          updatedAt: product.updatedAt,
         }));
         
         setProducts(transformedProducts);
@@ -138,18 +147,156 @@ export const Home = () => {
     ));
   };
 
+  // New: Handler to delete a product
+  const handleDeleteProduct = async (productId) => {
+    try {
+      const response = await fetch(`http://localhost:8080/api/products/${productId}`, {
+        method: "DELETE"
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to delete product ${productId}`);
+      }
+      // Remove the product from the state
+      setProducts(products.filter(p => p.id !== productId));
+      // Also remove the product from the cart if it exists there
+      setCartItems(cartItems.filter(item => item.id !== productId));
+      alert("Product deleted successfully!");
+    } catch (err) {
+      console.error("Error deleting product:", err);
+      alert("Error deleting product. Please try again.");
+    }
+  };
+
+  // This function handles the "Place Order" action.
+  // It updates the quantity of each ordered product using the update endpoint.
+  const handlePlaceOrder = async () => {
+    try {
+      // Loop over each item in the cart
+      const updatePromises = cartItems.map(async (cartItem) => {
+        // Find the corresponding product from state
+        const product = products.find(p => p.id === cartItem.id);
+        if (!product) return;
+
+        // Calculate new quantity (subtracting the ordered quantity)
+        const newQuantity = product.quantity - cartItem.quantity;
+        
+        // Prepare the update payload
+        const payload = {
+          name: product.name,
+          category: { categoryId: product.category.categoryId },
+          description: product.description,
+          price: product.price,
+          quantity: newQuantity,
+          isAvailable: newQuantity > 0,
+          createdAt: product.createdAt, // keep as is
+          updatedAt: new Date().toISOString(),
+        };
+
+        // Call the update endpoint for the product
+        const response = await fetch(`http://localhost:8080/api/products/${product.id}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to update product ${product.id}`);
+        }
+        return { productId: product.id, newQuantity };
+      });
+      
+      // Wait for all update calls to complete
+      const results = await Promise.all(updatePromises);
+      
+      // Update the products state with new quantities
+      const updatedProducts = products.map(product => {
+        const updated = results.find(r => r.productId === product.id);
+        if (updated) {
+          return { 
+            ...product, 
+            quantity: updated.newQuantity, 
+            isAvailable: updated.newQuantity > 0, 
+            available: updated.newQuantity > 0 
+          };
+        }
+        return product;
+      });
+      setProducts(updatedProducts);
+      
+      // Optionally, clear the cart or show a success message
+      setCartItems([]);
+      alert("Order placed and product quantities updated successfully!");
+      
+    } catch (err) {
+      console.error("Error placing order:", err);
+      alert("Error placing order. Please try again.");
+    }
+  };
+
   // Filter products by active category
   const filteredProducts = activeCategory === 1 
     ? products 
     : products.filter(product => {
         const category = categories.find(cat => cat.id === activeCategory);
-        return category && product.category === category.name;
+        return category && product.categoryName === category.name;
       });
 
   // Calculate order summary
   const subtotal = cartItems.reduce((sum, item) => sum + (item.price * item.quantity), 0);
   const tax = subtotal * 0.1; // 10% tax
   const total = subtotal + tax;
+
+  // Handler for when the edit form is submitted (same as before)
+  const handleEditSubmit = async (e) => {
+    e.preventDefault();
+    const payload = {
+      name: e.target.name.value,
+      category: {
+        categoryId: e.target.category.value
+      },
+      description: e.target.description.value,
+      price: parseFloat(e.target.price.value),
+      quantity: parseInt(e.target.quantity.value, 10),
+      isAvailable: e.target.isAvailable.checked,
+      createdAt: editProduct.createdAt,
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      const response = await fetch(`http://localhost:8080/api/products/${editProduct.id}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+      
+      if (!response.ok) {
+        throw new Error("Failed to update product");
+      }
+      
+      const updatedProduct = { 
+        ...editProduct, 
+        name: payload.name, 
+        category: { categoryId: payload.category.categoryId, categoryName: e.target.category.options[e.target.category.selectedIndex].text },
+        categoryName: e.target.category.options[e.target.category.selectedIndex].text,
+        description: payload.description, 
+        price: payload.price, 
+        quantity: payload.quantity, 
+        isAvailable: payload.isAvailable, 
+        available: payload.isAvailable, 
+        updatedAt: payload.updatedAt 
+      };
+
+      setProducts(products.map(p => p.id === updatedProduct.id ? updatedProduct : p));
+      setEditProduct(null);
+      
+    } catch (err) {
+      console.error("Error updating product:", err);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -189,7 +336,9 @@ export const Home = () => {
           <div className="flex-1 p-4 overflow-y-auto">
             {/* Category Selection */}
             <div className="mb-6">
-              <h2 className="text-lg font-bold mb-2">Choose Category <span className="text-green-500 text-sm">{categories.length}+ categories</span></h2>
+              <h2 className="text-lg font-bold mb-2">
+                Choose Category <span className="text-green-500 text-sm">{categories.length}+ categories</span>
+              </h2>
               
               <div className="flex space-x-2 overflow-x-auto pb-2">
                 {categories.map(category => (
@@ -219,19 +368,38 @@ export const Home = () => {
                     </div>
                     <div className="absolute bottom-1 text-center">
                       <div className="inline-block px-3 py-1 bg-gray-200 bg-opacity-80 rounded-full text-sm">
-                        {product.category.toUpperCase()}
+                        {product.categoryName.toUpperCase()}
                       </div>
                     </div>
                   </div>
                   <h3 className="font-bold text-center my-2">{product.name}</h3>
                   <p className="text-center text-green-500 font-medium">Rs.{product.price.toFixed(2)}</p>
-                  <button 
-                    className={`w-full py-1 rounded-md text-white text-sm mt-2 ${product.added ? 'bg-green-500' : 'bg-yellow-400'} ${!product.available ? 'cursor-not-allowed' : ''}`}
-                    onClick={() => product.available && handleAddToCart(product)}
-                    disabled={!product.available}
-                  >
-                    {!product.available ? 'Out of Stock' : product.added ? 'Added' : 'Add'}
-                  </button>
+                  {/* Display current quantity from API */}
+                  <p className="text-center text-gray-600">Quantity: {product.quantity}</p>
+                  <div className="flex space-x-2 mt-2">
+                    <button 
+                      className={`w-full py-1 rounded-md text-white text-sm ${product.added ? 'bg-green-500' : 'bg-yellow-400'} ${!product.available ? 'cursor-not-allowed' : ''}`}
+                      onClick={() => product.available && handleAddToCart(product)}
+                      disabled={!product.available}
+                    >
+                      {!product.available ? 'Out of Stock' : product.added ? 'Added' : 'Add'}
+                    </button>
+                    {/* Edit Button */}
+                    <button 
+                      className="w-full py-1 rounded-md text-white text-sm bg-blue-500"
+                      onClick={() => setEditProduct(product)}
+                      disabled={!product.available}
+                    >
+                      Edit
+                    </button>
+                    {/* Delete Button */}
+                    <button 
+                      className="w-full py-1 rounded-md text-white text-sm bg-red-500"
+                      onClick={() => handleDeleteProduct(product.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -242,7 +410,9 @@ export const Home = () => {
             {/* Order Header */}
             <div className="p-4 border-b border-gray-200 flex justify-between items-center">
               <h2 className="font-bold">New Order Bill</h2>
-              <span className="text-gray-500">{new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</span>
+              <span className="text-gray-500">
+                {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+              </span>
             </div>
             
             {/* Cart Items */}
@@ -324,6 +494,7 @@ export const Home = () => {
               
               {/* Place Order Button */}
               <button 
+                onClick={handlePlaceOrder}
                 className={`w-full py-3 font-medium rounded-md ${cartItems.length > 0 ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}
                 disabled={cartItems.length === 0}
               >
@@ -333,6 +504,94 @@ export const Home = () => {
           </div>
         </div>
       </div>
+
+      {/* Edit Modal */}
+      {editProduct && (
+        <div className="fixed inset-0 bg-black bg-opacity-30 flex justify-center items-center z-50">
+          <div className="bg-white p-6 rounded-md w-96">
+            <h2 className="text-xl font-bold mb-4">Edit Product</h2>
+            <form onSubmit={handleEditSubmit}>
+              <div className="mb-3">
+                <label className="block text-sm font-medium">Name</label>
+                <input
+                  type="text"
+                  name="name"
+                  defaultValue={editProduct.name}
+                  className="w-full border rounded p-2"
+                  required
+                />
+              </div>
+              <div className="mb-3">
+                <label className="block text-sm font-medium">Category</label>
+                <select 
+                  name="category" 
+                  defaultValue={editProduct.category.categoryId} 
+                  className="w-full border rounded p-2"
+                  required
+                >
+                  {categories.filter(cat => cat.id !== 1).map(cat => (
+                    <option key={cat.id} value={cat.id}>{cat.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="mb-3">
+                <label className="block text-sm font-medium">Description</label>
+                <textarea
+                  name="description"
+                  defaultValue={editProduct.description}
+                  className="w-full border rounded p-2"
+                />
+              </div>
+              <div className="mb-3">
+                <label className="block text-sm font-medium">Price</label>
+                <input
+                  type="number"
+                  name="price"
+                  step="0.01"
+                  defaultValue={editProduct.price}
+                  className="w-full border rounded p-2"
+                  required
+                />
+              </div>
+              <div className="mb-3">
+                <label className="block text-sm font-medium">Quantity</label>
+                <input
+                  type="number"
+                  name="quantity"
+                  defaultValue={editProduct.quantity}
+                  className="w-full border rounded p-2"
+                  required
+                />
+              </div>
+              <div className="mb-3 flex items-center">
+                <input
+                  type="checkbox"
+                  name="isAvailable"
+                  defaultChecked={editProduct.isAvailable}
+                  className="mr-2"
+                />
+                <label className="text-sm font-medium">Available</label>
+              </div>
+              <div className="flex justify-end space-x-3">
+                <button 
+                  type="button" 
+                  onClick={() => setEditProduct(null)} 
+                  className="px-4 py-2 bg-gray-200 rounded"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit" 
+                  className="px-4 py-2 bg-blue-500 text-white rounded"
+                >
+                  Save
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };
